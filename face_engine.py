@@ -60,8 +60,12 @@ class FaceEngine:
 
     def recognize_faces(self, frame):
         """Detect every face in the frame and return a list of results, one per face:
-        {"location": (top, right, bottom, left), "name": str, "relationship": str|None}
+        {"location": (top, right, bottom, left), "name": str, "relationship": str|None,
+         "distance": float|None, "encoding": np.ndarray}
         Unmatched faces get name="UNKNOWN", relationship=None.
+
+        The raw "encoding" is always included (even for known faces) so callers
+        can register an unknown face on the spot without re-running detection.
         """
         locations, encodings = self.detect_and_encode(frame)
         results = []
@@ -74,11 +78,18 @@ class FaceEngine:
                         "name": match["name"],
                         "relationship": match["relationship"],
                         "distance": match["distance"],
+                        "encoding": encoding,
                     }
                 )
             else:
                 results.append(
-                    {"location": location, "name": "UNKNOWN", "relationship": None, "distance": None}
+                    {
+                        "location": location,
+                        "name": "UNKNOWN",
+                        "relationship": None,
+                        "distance": None,
+                        "encoding": encoding,
+                    }
                 )
         return results
 
