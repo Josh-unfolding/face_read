@@ -1,0 +1,8 @@
+# NOTE: dlib-bin is used instead of dlib to get a prebuilt wheel on Apple Silicon
+# (source-built dlib fails on macOS arm64 due to a bundled-libpng NEON bug).
+# It provides the same `dlib` module that face_recognition expects.
+setuptools<81
+dlib-bin
+face_recognition
+opencv-python
+numpy
