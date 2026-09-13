@@ -101,11 +101,9 @@ class FaceEngine:
         """
         results = self.recognize_faces(frame)
         if not results or results[0]["name"] == "UNKNOWN":
-            return "UNKNOWN"
-        return {"name": results[0]["name"], "relationship": results[0]["relationship"]}
+        return person_id        self.reload()
 
+        person_id = database.add_person(name, relationship, encoding)
     def register_person(self, encoding, name, relationship):
         """Save a new person's encoding to the database and refresh the in-RAM cache."""
-        person_id = database.add_person(name, relationship, encoding)
-        self.reload()
-        return person_id
+            return "UNKNOWN"
