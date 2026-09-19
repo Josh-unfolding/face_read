@@ -22,6 +22,7 @@ Usage:
     python face_system.py manage                          # entry-management menu on its own (no live video)
 """
 
+from arduino_interface import ArduinoInterface
 import pickle
 import platform
 import sqlite3
@@ -42,6 +43,14 @@ IS_WINDOWS = platform.system() == "Windows"
 # How long to wait before asking about the *same* still-unknown face again
 # after a registration attempt fails or is skipped. Prevents re-asking every frame.
 SKIP_COOLDOWN_SECONDS = 8
+arduino = ArduinoInterface("COM7")
+#arduino.test_buzzer()
+print("Testing Arduino...")
+
+message = arduino.read_message()
+
+if message == "EMERGENCY_BUTTON:PRESSED":
+    print("EMERGENCY BUTTON PRESSED!")
 
 
 def open_camera(index=0):
