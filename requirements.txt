@@ -6,3 +6,10 @@ dlib-bin
 face_recognition
 opencv-python
 numpy
+
+# googlemaps: official client for the Directions API, used by the `directions` command.
+# Requires a Google Cloud project with the Directions API enabled and billing set up.
+# Never hardcode the API key or home coordinates in source — set these as environment
+# variables instead (see the comment near GOOGLE_MAPS_API_KEY_ENV in face_app.py):
+#   GOOGLE_MAPS_API_KEY, HOME_LAT, HOME_LON
+googlemaps

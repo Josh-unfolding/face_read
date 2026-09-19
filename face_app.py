@@ -20,11 +20,15 @@ Usage:
     python face_system.py register "Rahul" "Son"          # register one person from webcam and exit (typed, no camera loop)
     python face_system.py register "Rahul" "Son" path/to/photo.jpg   # register from an image file and exit
     python face_system.py manage                          # entry-management menu on its own (no live video)
+    python face_system.py directions <lat> <lon>          # speak walking directions home from a given GPS fix
+                                                           #   (needs GOOGLE_MAPS_API_KEY, HOME_LAT, HOME_LON env vars)
 """
 
 from arduino_interface import ArduinoInterface
+import os
 import pickle
 import platform
+import re
 import sqlite3
 import sys
 import time
@@ -32,6 +36,7 @@ from pathlib import Path
 
 import cv2
 import face_recognition
+import googlemaps
 import numpy as np
 import pyttsx3
 import speech_recognition as sr
@@ -39,6 +44,16 @@ import speech_recognition as sr
 DB_PATH = Path(__file__).parent / "face_database.db"
 DEFAULT_TOLERANCE = 0.6
 IS_WINDOWS = platform.system() == "Windows"
+
+# Google Maps API key and home coordinates are read from the environment, never hardcoded
+# here — this repo is public, and both a Maps API key and a real home address are the kind
+# of thing that shouldn't sit in git history forever. Set these before using `directions`:
+#   set GOOGLE_MAPS_API_KEY=...      (Windows)   /   export GOOGLE_MAPS_API_KEY="..."  (Mac/Linux)
+#   set HOME_LAT=9.094020
+#   set HOME_LON=76.491208
+GOOGLE_MAPS_API_KEY_ENV = "GOOGLE_MAPS_API_KEY"
+HOME_LAT_ENV = "HOME_LAT"
+HOME_LON_ENV = "HOME_LON"
 
 # How long to wait before asking about the *same* still-unknown face again
 # after a registration attempt fails or is skipped. Prevents re-asking every frame.
@@ -468,6 +483,73 @@ def announcement_for(name, relationship):
 
 
 # --------------------------------------------------------------------------
+# Navigation home (CLI: directions) — Google Maps Directions API, walking mode
+# --------------------------------------------------------------------------
+
+_HTML_TAG_RE = re.compile(r"<[^<]+?>")
+
+
+def _strip_html(text):
+    return _HTML_TAG_RE.sub("", text)
+
+
+def get_walking_directions(current_lat, current_lon, home_lat=None, home_lon=None):
+    """Fetch walking directions from (current_lat, current_lon) to home via the Google
+    Maps Directions API. Returns {"distance": str, "duration": str, "steps": [str, ...]},
+    or None if the API key/home coordinates aren't configured or the request fails.
+    """
+    api_key = os.environ.get(GOOGLE_MAPS_API_KEY_ENV)
+    if not api_key:
+        print(f"[maps] Set the {GOOGLE_MAPS_API_KEY_ENV} environment variable to use directions.")
+        return None
+
+    if home_lat is None:
+        home_lat = os.environ.get(HOME_LAT_ENV)
+    if home_lon is None:
+        home_lon = os.environ.get(HOME_LON_ENV)
+    if home_lat is None or home_lon is None:
+        print(f"[maps] Set the {HOME_LAT_ENV} and {HOME_LON_ENV} environment variables.")
+        return None
+
+    try:
+        client = googlemaps.Client(key=api_key)
+        routes = client.directions(
+            origin=(current_lat, current_lon),
+            destination=(float(home_lat), float(home_lon)),
+            mode="walking",
+        )
+    except Exception as exc:
+        print(f"[maps] Directions request failed: {exc}")
+        return None
+
+    if not routes:
+        print("[maps] No walking route found between those points.")
+        return None
+
+    leg = routes[0]["legs"][0]
+    return {
+        "distance": leg["distance"]["text"],
+        "duration": leg["duration"]["text"],
+        "steps": [_strip_html(step["html_instructions"]) for step in leg["steps"]],
+    }
+
+
+def announce_directions_home(current_lat, current_lon, voice_io=None):
+    """Print (and speak, if a Voice instance is given) a summary + first step of the walk home."""
+    directions = get_walking_directions(current_lat, current_lon)
+    if directions is None:
+        message = "Sorry, I can't get directions home right now."
+    else:
+        first_step = directions["steps"][0] if directions["steps"] else ""
+        message = f"Home is {directions['distance']} away, about {directions['duration']} on foot. {first_step}"
+
+    print(message)
+    if voice_io is not None:
+        voice_io.speak(message)
+    return directions
+
+
+# --------------------------------------------------------------------------
 # Live webcam test (CLI: test)
 # --------------------------------------------------------------------------
 
@@ -756,6 +838,12 @@ if __name__ == "__main__":
 
     elif command == "manage":
         run_manage()
+
+    elif command == "directions":
+        if len(sys.argv) < 4:
+            print("Usage: python face_system.py directions <current_lat> <current_lon>")
+            sys.exit(1)
+        announce_directions_home(float(sys.argv[2]), float(sys.argv[3]), voice_io=Voice(enabled=True))
 
     else:
         print_usage()
