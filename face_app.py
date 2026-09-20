@@ -523,12 +523,29 @@ def _get_directions_via_ors(current_lat, current_lon, home_lat, home_lon):
             },
             timeout=10,
         )
-        response.raise_for_status()
         data = response.json()
-        summary = data["routes"][0]["summary"]
-        steps = [step["instruction"] for step in data["routes"][0]["segments"][0]["steps"]]
-    except Exception as exc:
+    except requests.RequestException as exc:
         print(f"[maps] OpenRouteService request failed: {exc}")
+        return None
+    except ValueError as exc:
+        print(f"[maps] OpenRouteService returned a non-JSON response: {exc}")
+        return None
+
+    if "error" in data:
+        print(f"[maps] OpenRouteService error: {data['error']}")
+        return None
+    if not response.ok:
+        print(f"[maps] OpenRouteService HTTP {response.status_code}")
+        return None
+
+    try:
+        # The GET endpoint returns a GeoJSON FeatureCollection: the route summary and
+        # turn-by-turn steps live under features[0].properties, not a top-level "routes" key.
+        properties = data["features"][0]["properties"]
+        summary = properties["summary"]
+        steps = [step["instruction"] for step in properties["segments"][0]["steps"]]
+    except (KeyError, IndexError) as exc:
+        print(f"[maps] Unexpected OpenRouteService response shape (missing {exc})")
         return None
 
     return {
