@@ -20,9 +20,14 @@ Usage:
     python face_system.py register "Rahul" "Son"          # register one person from webcam and exit (typed, no camera loop)
     python face_system.py register "Rahul" "Son" path/to/photo.jpg   # register from an image file and exit
     python face_system.py manage                          # entry-management menu on its own (no live video)
+    python face_system.py directions <lat> <lon>          # speak walking directions home from a given GPS fix
+                                                           #   (needs HOME_LAT, HOME_LON; ORS_API_KEY optional for
+                                                           #   real routing, falls back to an offline estimate)
 """
 
 from arduino_interface import ArduinoInterface
+import math
+import os
 import pickle
 import platform
 import sqlite3
@@ -34,11 +39,25 @@ import cv2
 import face_recognition
 import numpy as np
 import pyttsx3
+import requests
 import speech_recognition as sr
 
 DB_PATH = Path(__file__).parent / "face_database.db"
 DEFAULT_TOLERANCE = 0.6
 IS_WINDOWS = platform.system() == "Windows"
+
+# Home coordinates are read from the environment, never hardcoded here — this repo is
+# public, and a real home address is the kind of thing that shouldn't sit in git history
+# forever. ORS_API_KEY is optional (free signup at openrouteservice.org, no billing/card
+# required) — without it, `directions` still works using an offline straight-line
+# distance/direction estimate instead of real turn-by-turn walking directions.
+#   set ORS_API_KEY=...      (Windows, optional)   /   export ORS_API_KEY="..."  (Mac/Linux)
+#   set HOME_LAT=9.094020
+#   set HOME_LON=76.491208
+ORS_API_KEY_ENV = "ORS_API_KEY"
+ORS_DIRECTIONS_URL = "https://api.openrouteservice.org/v2/directions/foot-walking"
+HOME_LAT_ENV = "HOME_LAT"
+HOME_LON_ENV = "HOME_LON"
 
 # How long to wait before asking about the *same* still-unknown face again
 # after a registration attempt fails or is skipped. Prevents re-asking every frame.
@@ -468,6 +487,153 @@ def announcement_for(name, relationship):
 
 
 # --------------------------------------------------------------------------
+# Navigation home (CLI: directions) — OpenRouteService (free) for real walking
+# directions when available, falling back to an offline distance/direction
+# estimate (pure math, no internet or API key needed) when it isn't.
+# --------------------------------------------------------------------------
+
+def _format_distance_meters(meters):
+    if meters >= 1000:
+        return f"{meters / 1000:.1f} km"
+    return f"{meters:.0f} m"
+
+
+def _format_duration_seconds(seconds):
+    minutes = seconds / 60
+    if minutes < 1:
+        return "less than a minute"
+    return f"{minutes:.0f} min{'s' if minutes >= 2 else ''}"
+
+
+def _get_directions_via_ors(current_lat, current_lon, home_lat, home_lon):
+    """Try OpenRouteService (free, no billing — https://openrouteservice.org).
+    Returns {"distance", "duration", "steps", "source"}, or None if unavailable/failed.
+    """
+    api_key = os.environ.get(ORS_API_KEY_ENV)
+    if not api_key:
+        return None
+
+    try:
+        response = requests.get(
+            ORS_DIRECTIONS_URL,
+            params={
+                "api_key": api_key,
+                "start": f"{current_lon},{current_lat}",
+                "end": f"{home_lon},{home_lat}",
+            },
+            timeout=10,
+        )
+        data = response.json()
+    except requests.RequestException as exc:
+        print(f"[maps] OpenRouteService request failed: {exc}")
+        return None
+    except ValueError as exc:
+        print(f"[maps] OpenRouteService returned a non-JSON response: {exc}")
+        return None
+
+    if "error" in data:
+        print(f"[maps] OpenRouteService error: {data['error']}")
+        return None
+    if not response.ok:
+        print(f"[maps] OpenRouteService HTTP {response.status_code}")
+        return None
+
+    try:
+        # The GET endpoint returns a GeoJSON FeatureCollection: the route summary and
+        # turn-by-turn steps live under features[0].properties, not a top-level "routes" key.
+        properties = data["features"][0]["properties"]
+        summary = properties["summary"]
+        steps = [step["instruction"] for step in properties["segments"][0]["steps"]]
+    except (KeyError, IndexError) as exc:
+        print(f"[maps] Unexpected OpenRouteService response shape (missing {exc})")
+        return None
+
+    return {
+        "distance": _format_distance_meters(summary["distance"]),
+        "duration": _format_duration_seconds(summary["duration"]),
+        "steps": steps,
+        "source": "openrouteservice",
+    }
+
+
+_COMPASS_DIRECTIONS = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"]
+
+
+def _haversine_distance_and_bearing(lat1, lon1, lat2, lon2):
+    """Great-circle distance (meters) and initial compass bearing (as an 8-point
+    direction string) between two points. Pure math — no internet, no API key.
+    """
+    earth_radius_m = 6371000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lambda = math.radians(lon2 - lon1)
+
+    a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    distance_m = 2 * earth_radius_m * math.asin(math.sqrt(a))
+
+    y = math.sin(d_lambda) * math.cos(phi2)
+    x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(d_lambda)
+    bearing_deg = (math.degrees(math.atan2(y, x)) + 360) % 360
+    direction = _COMPASS_DIRECTIONS[round(bearing_deg / 45) % 8]
+
+    return distance_m, direction
+
+
+def _get_directions_via_haversine(current_lat, current_lon, home_lat, home_lon):
+    """Offline fallback when OpenRouteService is unset/unreachable: straight-line
+    distance + rough compass direction only, no routed steps.
+    """
+    distance_m, direction = _haversine_distance_and_bearing(current_lat, current_lon, home_lat, home_lon)
+    distance_str = _format_distance_meters(distance_m)
+    return {
+        "distance": distance_str,
+        "duration": None,
+        "steps": [f"Home is roughly {distance_str} to the {direction} in a straight line."],
+        "source": "offline-estimate",
+    }
+
+
+def get_walking_directions(current_lat, current_lon, home_lat=None, home_lon=None):
+    """Get directions home: tries OpenRouteService first (real routed walking
+    directions), falls back to an offline straight-line estimate if that's
+    unavailable. Returns {"distance": str, "duration": str|None, "steps": [str, ...],
+    "source": str}, or None if home coordinates aren't configured at all.
+    """
+    if home_lat is None:
+        home_lat = os.environ.get(HOME_LAT_ENV)
+    if home_lon is None:
+        home_lon = os.environ.get(HOME_LON_ENV)
+    if home_lat is None or home_lon is None:
+        print(f"[maps] Set the {HOME_LAT_ENV} and {HOME_LON_ENV} environment variables.")
+        return None
+    home_lat, home_lon = float(home_lat), float(home_lon)
+
+    directions = _get_directions_via_ors(current_lat, current_lon, home_lat, home_lon)
+    if directions is not None:
+        return directions
+
+    print("[maps] Falling back to an offline distance/direction estimate.")
+    return _get_directions_via_haversine(current_lat, current_lon, home_lat, home_lon)
+
+
+def announce_directions_home(current_lat, current_lon, voice_io=None):
+    """Print (and speak, if a Voice instance is given) a summary of the way home."""
+    directions = get_walking_directions(current_lat, current_lon)
+    if directions is None:
+        message = "Sorry, I can't get directions home right now."
+    elif directions["duration"] is not None:
+        first_step = directions["steps"][0] if directions["steps"] else ""
+        message = f"Home is {directions['distance']} away, about {directions['duration']} on foot. {first_step}"
+    else:
+        message = directions["steps"][0]
+
+    print(message)
+    if voice_io is not None:
+        voice_io.speak(message)
+    return directions
+
+
+# --------------------------------------------------------------------------
 # Live webcam test (CLI: test)
 # --------------------------------------------------------------------------
 
@@ -756,6 +922,12 @@ if __name__ == "__main__":
 
     elif command == "manage":
         run_manage()
+
+    elif command == "directions":
+        if len(sys.argv) < 4:
+            print("Usage: python face_system.py directions <current_lat> <current_lon>")
+            sys.exit(1)
+        announce_directions_home(float(sys.argv[2]), float(sys.argv[3]), voice_io=Voice(enabled=True))
 
     else:
         print_usage()

@@ -6,3 +6,12 @@ dlib-bin
 face_recognition
 opencv-python
 numpy
+
+# requests: used by the `directions` command to call OpenRouteService (openrouteservice.org)
+# for real walking directions — free, no billing/credit card required (just an email
+# signup for an API key). If ORS_API_KEY isn't set, or the request fails, `directions`
+# automatically falls back to a pure-math offline distance/direction estimate (no
+# dependency needed for that part). Never hardcode the API key or home coordinates in
+# source — set these as environment variables instead (see the comment near
+# ORS_API_KEY_ENV in face_app.py): ORS_API_KEY (optional), HOME_LAT, HOME_LON
+requests
